@@ -154,6 +154,15 @@ class RedteamLogcatTests(unittest.TestCase):
         self.assertIn("$ false", rendered.getvalue())
         self.assertIn("[exit 1]", rendered.getvalue())
 
+    def test_color_mode_preserves_only_safe_sgr_sequences(self) -> None:
+        output: list[str] = []
+        renderer = LOGCAT.PlainTextRenderer(output.append, preserve_sgr=True)
+
+        renderer.feed(b"\x1b[38;5;45mcyan\x1b[0m\x1b]0;unsafe-title\x07")
+        renderer.finish()
+
+        self.assertEqual("".join(output), "\x1b[38;5;45mcyan\x1b[0m")
+
 
 if __name__ == "__main__":
     unittest.main()

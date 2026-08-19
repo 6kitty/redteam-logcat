@@ -39,6 +39,10 @@ sudo logcat
 Use `Ctrl-C` to stop viewing. `sudo logcat --history 20 --once` prints a
 bounded structured history instead of following new events.
 
+Colors emitted by the recorded command, such as Kali's coloured `ip addr`
+output, are preserved automatically when logcat writes to a terminal. Use
+`--color always` to force this, or `--no-color` for plain text.
+
 ## Evidence produced
 
 - `/var/log/redteam/commands.log`: structured command start/end records,

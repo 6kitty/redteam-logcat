@@ -20,12 +20,13 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 DEFAULT_COMMAND_LOG = Path("/var/log/redteam/commands.log")
 DEFAULT_SESSIONS_DIR = Path("/var/log/redteam/sessions")
 MARKER_PREFIX = b"\x1b]777;redteam-logcat;"
 MAX_PENDING_OUTPUT = 1024 * 1024
 FIELD_RE = re.compile(r"\[([a-z_]+)=([^\]]*)\]")
+SGR_RE = re.compile(r"\x1b\[[0-9;:]*m")
 
 
 class LogcatError(RuntimeError):
@@ -164,7 +165,7 @@ class MarkerSplitter:
 
 
 class PlainTextRenderer:
-    """Strip terminal controls so recorded output cannot control this terminal."""
+    """Drop terminal controls, optionally retaining safe Select Graphic Rendition colors."""
 
     NORMAL = 0
     ESCAPE = 1
@@ -172,10 +173,12 @@ class PlainTextRenderer:
     OSC = 3
     STRING = 4
 
-    def __init__(self, emit: Callable[[str], None]) -> None:
+    def __init__(self, emit: Callable[[str], None], *, preserve_sgr: bool) -> None:
         self._emit = emit
+        self._preserve_sgr = preserve_sgr
         self._state = self.NORMAL
         self._text = bytearray()
+        self._csi = bytearray()
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._last_was_cr = False
 
@@ -211,6 +214,7 @@ class PlainTextRenderer:
                     self._last_was_cr = False
             elif self._state == self.ESCAPE:
                 if value == ord("["):
+                    self._csi = bytearray(b"\x1b[")
                     self._state = self.CSI
                 elif value == ord("]"):
                     self._state = self.OSC
@@ -219,7 +223,15 @@ class PlainTextRenderer:
                 else:
                     self._state = self.NORMAL
             elif self._state == self.CSI:
+                self._csi.append(value)
                 if 0x40 <= value <= 0x7E:
+                    if (
+                        self._preserve_sgr
+                        and value == ord("m")
+                        and all(character in b"0123456789;:" for character in self._csi[2:-1])
+                    ):
+                        self._emit(self._csi.decode("ascii"))
+                    self._csi.clear()
                     self._state = self.NORMAL
             elif self._state == self.OSC:
                 if value == 0x07:
@@ -248,7 +260,8 @@ class IndentedOutput:
 
     @classmethod
     def _write_line(cls, line: str) -> None:
-        if not line.strip() or cls._is_script_footer(line):
+        visible_line = SGR_RE.sub("", line)
+        if not visible_line.strip() or cls._is_script_footer(visible_line):
             return
         sys.stdout.write(f"    {line}\n")
         sys.stdout.flush()
@@ -272,6 +285,7 @@ class SessionView:
     output_path: Path
     timing_path: Path
     start_at_end: bool
+    color: bool = False
     waiting_events: dict[str, CommandEvent] = field(default_factory=dict)
     active_sequence: str | None = None
     active_event: CommandEvent | None = None
@@ -282,7 +296,7 @@ class SessionView:
 
     def __post_init__(self) -> None:
         self.output_follower = SecureFollower(self.output_path, start_at_end=self.start_at_end)
-        self.renderer = PlainTextRenderer(self._on_text)
+        self.renderer = PlainTextRenderer(self._on_text, preserve_sgr=self.color)
         self.splitter = MarkerSplitter(self.renderer.feed, self._on_marker)
 
     def register_event(self, event: CommandEvent) -> None:
@@ -368,6 +382,7 @@ class Logcat:
         history: int,
         interval: float,
         once: bool,
+        color: bool = False,
     ) -> None:
         self.command_follower = SecureFollower(command_log, start_at_end=history == 0)
         self.command_pending = b""
@@ -376,6 +391,7 @@ class Logcat:
         self.history = history
         self.interval = interval
         self.once = once
+        self.color = color
         self.sessions: dict[str, SessionView] = {}
 
     def discover_sessions(self) -> None:
@@ -405,6 +421,7 @@ class Logcat:
                         output_path=output_path,
                         timing_path=timing_path,
                         start_at_end=self.start_at_end,
+                        color=self.color,
                     )
 
     @staticmethod
@@ -458,6 +475,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="replay the last N structured command events (default: live events only)",
     )
     parser.add_argument("--interval", type=float, default=0.15, help="poll interval in seconds (default: 0.15)")
+    parser.add_argument(
+        "--color",
+        choices=("auto", "always", "never"),
+        default="never" if os.environ.get("NO_COLOR") is not None else "auto",
+        help="preserve safe ANSI colors from recorded output (default: auto)",
+    )
+    parser.add_argument("--no-color", action="store_const", const="never", dest="color", help=argparse.SUPPRESS)
     parser.add_argument("--once", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"redteam-logcat {VERSION}")
     return parser
@@ -474,6 +498,7 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.interval <= 0:
         print("logcat: --interval must be positive", file=sys.stderr)
         return 64
+    color = arguments.color == "always" or (arguments.color == "auto" and sys.stdout.isatty())
     try:
         Logcat(
             command_log=arguments.commands_log,
@@ -481,6 +506,7 @@ def main(argv: list[str] | None = None) -> int:
             history=arguments.history,
             interval=arguments.interval,
             once=arguments.once,
+            color=color,
         ).run()
     except KeyboardInterrupt:
         print("\nlogcat stopped")
