@@ -43,6 +43,20 @@ Colors emitted by the recorded command, such as Kali's coloured `ip addr`
 output, are preserved automatically when logcat writes to a terminal. Use
 `--color always` to force this, or `--no-color` for plain text.
 
+## Platform support
+
+| Component | Kali/Debian Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Python `logcat` viewer core | Supported and integration-tested | Unit-tested in CI | Unit-tested in CI |
+| One-command evidence collector (`install.sh`) | Supported | Not provided | Not provided |
+
+The collector relies on Linux systemd, rsyslog, auditd, and util-linux `script`.
+Those mechanisms do not have compatible drop-in equivalents on macOS or Windows,
+so `install.sh` deliberately rejects those operating systems rather than claiming
+to create equivalent evidence. The GitHub Actions matrix runs the viewer's parser,
+safe rendering, color handling, and platform-specific privilege check on Ubuntu,
+macOS, and Windows with Python 3.11 and 3.13.
+
 ## Evidence produced
 
 - `/var/log/redteam/commands.log`: structured command start/end records,

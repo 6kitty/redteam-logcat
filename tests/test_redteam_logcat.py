@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).parents[1] / "redteam_logcat.py"
@@ -162,6 +163,14 @@ class RedteamLogcatTests(unittest.TestCase):
         renderer.finish()
 
         self.assertEqual("".join(output), "\x1b[38;5;45mcyan\x1b[0m")
+
+    def test_windows_administrator_check_uses_windows_api(self) -> None:
+        with (
+            mock.patch.object(LOGCAT.os, "name", "nt"),
+            mock.patch.object(LOGCAT.ctypes, "windll", create=True) as windll,
+        ):
+            windll.shell32.IsUserAnAdmin.return_value = 1
+            self.assertTrue(LOGCAT.has_elevated_privileges())
 
 
 if __name__ == "__main__":

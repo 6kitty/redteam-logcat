@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import ctypes
 import os
 import re
 import stat
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 DEFAULT_COMMAND_LOG = Path("/var/log/redteam/commands.log")
 DEFAULT_SESSIONS_DIR = Path("/var/log/redteam/sessions")
 MARKER_PREFIX = b"\x1b]777;redteam-logcat;"
@@ -69,6 +70,16 @@ def parse_command_event(line: str) -> CommandEvent | None:
         working_directory=fields["pwd"],
         command=remainder[command_position + len(command_marker) :].rstrip("\n"),
     )
+
+
+def has_elevated_privileges() -> bool:
+    """Return whether this process can read root/administrator-only evidence files."""
+    if os.name == "nt":
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except (AttributeError, OSError):
+            return False
+    return os.geteuid() == 0
 
 
 class SecureFollower:
@@ -489,8 +500,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
-    if os.geteuid() != 0:
-        print("logcat: run with sudo; evidence files are root-only", file=sys.stderr)
+    if not has_elevated_privileges():
+        privilege_command = "Run PowerShell as Administrator" if os.name == "nt" else "run with sudo"
+        print(f"logcat: {privilege_command}; evidence files are administrator-only", file=sys.stderr)
         return 77
     if arguments.history < 0:
         print("logcat: --history must not be negative", file=sys.stderr)

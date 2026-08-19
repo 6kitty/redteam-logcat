@@ -1,0 +1,35 @@
+name: Cross-platform core tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile viewer
+        run: python -m py_compile redteam_logcat.py
+      - name: Run viewer tests
+        run: python tests/test_redteam_logcat.py -v
+      - name: Parse Linux installer
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash -n install.sh
+          bash install.sh --help
