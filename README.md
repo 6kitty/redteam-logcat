@@ -25,9 +25,10 @@ cd redteam-logcat
 sudo ./install.sh --user kali
 ```
 
-The installer installs rsyslog and auditd when absent, creates root-only evidence
-paths, configures one account's interactive Bash/Zsh sessions, and installs
-`/usr/local/bin/logcat`. It is safe to re-run: existing
+The installer installs rsyslog, auditd, and OpenSSH server support when absent,
+creates root-only evidence paths, configures one account's interactive Bash/Zsh
+sessions **and its non-interactive SSH commands**, and installs `/usr/local/bin/logcat`.
+It is safe to re-run: existing
 `/var/log/redteam/commands.log` is preserved.
 
 Start observing in one SSH terminal, then operate in another:
@@ -64,7 +65,10 @@ macOS, and Windows with Python 3.11 and 3.13.
   and sequence ID.
 - `/var/log/redteam/sessions/USER/SESSION/output.log`: raw terminal output.
 - `/var/log/redteam/sessions/USER/SESSION/timing.log`: util-linux timing
-  data for `scriptreplay`.
+  data for `scriptreplay` on interactive sessions. Non-interactive SSH command
+  sessions use an empty timing file and a root-only `command.txt`; their output
+  is streamed verbatim to `output.log` while preserving the command's stdout,
+  stderr, and exit status for the SSH client.
 - auditd rules with key `redteam_exec`: kernel-level `execve` evidence for
   the configured login UID.
 
@@ -72,6 +76,12 @@ The viewer uses a session-scoped private terminal boundary emitted by the shell
 hook. It does not guess relationships from timestamps. Terminal control
 sequences are removed before display, so recorded output cannot control the
 reviewer's terminal. Output is shown as plain text, not as a terminal emulator.
+
+For the configured account, the installer also adds an OpenSSH `Match User`
+`ForceCommand` wrapper. This turns `ssh host 'command'` into one root-owned
+evidence session without changing the command's output bytes or exit status.
+The default SFTP subsystem is passed through unchanged, so SFTP remains
+available but is not converted into a terminal-style command/output record.
 
 ## Security boundary
 

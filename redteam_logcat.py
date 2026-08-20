@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 
-VERSION = "0.1.3"
+VERSION = "0.2.0"
 DEFAULT_COMMAND_LOG = Path("/var/log/redteam/commands.log")
 DEFAULT_SESSIONS_DIR = Path("/var/log/redteam/sessions")
 MARKER_PREFIX = b"\x1b]777;redteam-logcat;"
@@ -295,7 +295,9 @@ class SessionView:
     session_id: str
     output_path: Path
     timing_path: Path
+    metadata_path: Path
     start_at_end: bool
+    capture_kind: str = "terminal"
     color: bool = False
     waiting_events: dict[str, CommandEvent] = field(default_factory=dict)
     active_sequence: str | None = None
@@ -304,14 +306,29 @@ class SessionView:
     completed_return_codes: dict[str, str] = field(default_factory=dict)
     pending_output: list[str] = field(default_factory=list)
     displayed_output: IndentedOutput | None = None
+    stream_completed_return_code: str | None = None
+    stream_completion_seen: bool = False
 
     def __post_init__(self) -> None:
         self.output_follower = SecureFollower(self.output_path, start_at_end=self.start_at_end)
         self.renderer = PlainTextRenderer(self._on_text, preserve_sgr=self.color)
         self.splitter = MarkerSplitter(self.renderer.feed, self._on_marker)
+        if self.capture_kind == "ssh-command":
+            # A forced SSH command has one command per recording.  Its output
+            # must be mirrored to the SSH client verbatim, so it cannot carry
+            # the invisible terminal markers used by interactive sessions.
+            self.active_sequence = "ssh-stream"
 
     def register_event(self, event: CommandEvent) -> None:
         self.waiting_events[event.sequence] = event
+        if self.capture_kind == "ssh-command":
+            if self.active_event is None:
+                self.active_sequence = event.sequence
+                self._begin_event(event)
+            if self.stream_completion_seen:
+                self.active_return_code = self.stream_completed_return_code
+                self._finish_event()
+            return
         completed_return_code = self.completed_return_codes.pop(event.sequence, None)
         if completed_return_code is not None:
             self.active_sequence = event.sequence
@@ -332,6 +349,24 @@ class SessionView:
         data = self.output_follower.read_new()
         if data:
             self.splitter.feed(data)
+        if self.capture_kind == "ssh-command" and not self.stream_completion_seen:
+            return_code = self._stream_return_code()
+            if return_code is not None:
+                self.stream_completion_seen = True
+                self.stream_completed_return_code = return_code
+                if self.active_event is not None:
+                    self.active_return_code = return_code
+                    self._finish_event()
+
+    def _stream_return_code(self) -> str | None:
+        try:
+            contents = self.metadata_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        fields = dict(line.partition("=")[::2] for line in contents.splitlines() if "=" in line)
+        if not fields.get("ended_utc"):
+            return None
+        return fields.get("exit_status", "?")
 
     def _begin_event(self, event: CommandEvent) -> None:
         self.active_event = event
@@ -425,27 +460,34 @@ class Logcat:
                 timing_path = session_directory / "timing.log"
                 if not metadata.is_file() or not output_path.exists() or not timing_path.exists():
                     continue
-                session_id = self._session_id(metadata)
+                session_id, capture_kind = self._session_details(metadata)
                 if session_id and session_id not in self.sessions:
                     self.sessions[session_id] = SessionView(
                         session_id=session_id,
                         output_path=output_path,
                         timing_path=timing_path,
+                        metadata_path=metadata,
                         start_at_end=self.start_at_end,
+                        capture_kind=capture_kind,
                         color=self.color,
                     )
 
     @staticmethod
-    def _session_id(metadata: Path) -> str | None:
+    def _session_details(metadata: Path) -> tuple[str | None, str]:
         try:
             contents = metadata.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return None
+            return None, "terminal"
+        fields: dict[str, str] = {}
         for line in contents.splitlines():
             key, separator, value = line.partition("=")
-            if key == "session" and separator and re.fullmatch(r"[A-Za-z0-9_.-]+", value):
-                return value
-        return None
+            if separator:
+                fields[key] = value
+        session_id = fields.get("session")
+        if not session_id or not re.fullmatch(r"[A-Za-z0-9_.-]+", session_id):
+            return None, "terminal"
+        capture_kind = fields.get("capture", "terminal")
+        return session_id, capture_kind
 
     def _read_command_events(self) -> None:
         self.command_pending += self.command_follower.read_new()
