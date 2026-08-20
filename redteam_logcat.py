@@ -26,6 +26,7 @@ DEFAULT_COMMAND_LOG = Path("/var/log/redteam/commands.log")
 DEFAULT_SESSIONS_DIR = Path("/var/log/redteam/sessions")
 MARKER_PREFIX = b"\x1b]777;redteam-logcat;"
 MAX_PENDING_OUTPUT = 1024 * 1024
+IDLE_SESSION_POLL_INTERVAL = 0.5
 FIELD_RE = re.compile(r"\[([a-z_]+)=([^\]]*)\]")
 SGR_RE = re.compile(r"\x1b\[[0-9;:]*m")
 
@@ -91,6 +92,23 @@ class SecureFollower:
         self.offset = 0
         self.identity: tuple[int, int] | None = None
         self.initialized = False
+        self._observed_signature: tuple[int, int, int, int] | None = None
+
+    def changed(self) -> bool:
+        """Return whether a safe read may reveal newly appended data."""
+        try:
+            details = os.stat(self.path, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise LogcatError(f"cannot stat {self.path}: {error.strerror}") from error
+        if not stat.S_ISREG(details.st_mode):
+            raise LogcatError(f"refusing non-regular evidence file: {self.path}")
+        signature = (details.st_dev, details.st_ino, details.st_size, details.st_mtime_ns)
+        if signature == self._observed_signature:
+            return False
+        self._observed_signature = signature
+        return True
 
     def read_new(self) -> bytes:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -308,6 +326,9 @@ class SessionView:
     displayed_output: IndentedOutput | None = None
     stream_completed_return_code: str | None = None
     stream_completion_seen: bool = False
+    last_polled_at: float | None = None
+    poll_requested: bool = True
+    _metadata_signature: tuple[int, int, int, int] | None = None
 
     def __post_init__(self) -> None:
         self.output_follower = SecureFollower(self.output_path, start_at_end=self.start_at_end)
@@ -321,6 +342,10 @@ class SessionView:
 
     def register_event(self, event: CommandEvent) -> None:
         self.waiting_events[event.sequence] = event
+        # The logger write precedes the corresponding terminal marker.  Ask
+        # the event loop to read this session immediately instead of waiting
+        # for its lower-frequency idle refresh.
+        self.poll_requested = True
         if self.capture_kind == "ssh-command":
             if self.active_event is None:
                 self.active_sequence = event.sequence
@@ -346,9 +371,10 @@ class SessionView:
         # Our installer emits explicit, invisible, session-scoped boundaries in
         # that raw stream; consume that stream directly and retain timing only
         # for evidence replay with scriptreplay.
-        data = self.output_follower.read_new()
-        if data:
-            self.splitter.feed(data)
+        if self.output_follower.changed():
+            data = self.output_follower.read_new()
+            if data:
+                self.splitter.feed(data)
         if self.capture_kind == "ssh-command" and not self.stream_completion_seen:
             return_code = self._stream_return_code()
             if return_code is not None:
@@ -359,6 +385,14 @@ class SessionView:
                     self._finish_event()
 
     def _stream_return_code(self) -> str | None:
+        try:
+            details = self.metadata_path.stat()
+        except OSError:
+            return None
+        signature = (details.st_dev, details.st_ino, details.st_size, details.st_mtime_ns)
+        if signature == self._metadata_signature:
+            return None
+        self._metadata_signature = signature
         try:
             contents = self.metadata_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -418,6 +452,18 @@ class SessionView:
         self.pending_output.clear()
         self.displayed_output = None
 
+    def needs_poll(self, now: float) -> bool:
+        """Prioritize active evidence while avoiding repeated idle file reads."""
+        if self.poll_requested or self.active_sequence is not None:
+            return True
+        if self.capture_kind == "ssh-command" and not self.stream_completion_seen:
+            return True
+        return self.last_polled_at is None or now - self.last_polled_at >= IDLE_SESSION_POLL_INTERVAL
+
+    def note_polled(self, now: float) -> None:
+        self.last_polled_at = now
+        self.poll_requested = False
+
 
 class Logcat:
     def __init__(
@@ -440,6 +486,7 @@ class Logcat:
         self.color = color
         self.sessions: dict[str, SessionView] = {}
         self.initial_session_discovery_complete = False
+        self._user_directory_mtimes: dict[Path, int] = {}
 
     def discover_sessions(self) -> None:
         start_new_sessions_at_end = self.start_at_end and not self.initial_session_discovery_complete
@@ -452,9 +499,13 @@ class Logcat:
             try:
                 if not user_directory.is_dir() or user_directory.is_symlink():
                     continue
+                user_mtime = user_directory.stat().st_mtime_ns
+                if self._user_directory_mtimes.get(user_directory) == user_mtime:
+                    continue
                 session_directories = tuple(user_directory.iterdir())
             except OSError:
                 continue
+            self._user_directory_mtimes[user_directory] = user_mtime
             for session_directory in session_directories:
                 if not session_directory.is_dir() or session_directory.is_symlink():
                     continue
@@ -512,14 +563,23 @@ class Logcat:
         print("Redteam Logcat — root-only live evidence view (Ctrl-C to stop)")
         if self.start_at_end:
             print("Waiting for new structured sessions and commands…")
+        next_poll = time.monotonic()
         while True:
+            now = time.monotonic()
             self.discover_sessions()
             self._read_command_events()
             for session in self.sessions.values():
-                session.poll()
+                if session.needs_poll(now):
+                    session.poll()
+                    session.note_polled(now)
             if self.once:
                 return
-            time.sleep(self.interval)
+            next_poll += self.interval
+            remaining = next_poll - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            else:
+                next_poll = time.monotonic()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -535,7 +595,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="replay the last N structured command events (default: live events only)",
     )
-    parser.add_argument("--interval", type=float, default=0.15, help="poll interval in seconds (default: 0.15)")
+    parser.add_argument("--interval", type=float, default=0.05, help="poll interval in seconds (default: 0.05)")
     parser.add_argument(
         "--color",
         choices=("auto", "always", "never"),
