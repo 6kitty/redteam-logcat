@@ -1,0 +1,17 @@
+[Unit]
+Description=Redteam Logcat mTLS evidence forwarder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/lib/redteam-logcat/redteam-linux-transport forward-once
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/redteam/transport
+ReadOnlyPaths=/var/log/redteam/sessions /etc/redteam /usr/local/lib/redteam-logcat

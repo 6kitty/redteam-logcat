@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Redteam Logcat evidence forwarder frequently
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=5s
+Persistent=true
+Unit=redteam-logcat-transport.service
+
+[Install]
+WantedBy=timers.target
