@@ -206,6 +206,45 @@ class RedteamLogcatTests(unittest.TestCase):
         self.assertIn("    remote stderr", result)
         self.assertIn("    [exit 7]", result)
 
+    def test_ssh_session_uses_full_command_and_stdin_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            session_directory = root / "sessions" / "kali" / "ssh-stdin"
+            session_directory.mkdir(parents=True)
+            (session_directory / "metadata").write_text(
+                "session=ssh-stdin\ncapture=ssh-command\nended_utc=2026-08-20T00:00:01Z\nexit_status=0\n",
+                encoding="utf-8",
+            )
+            full_command = "python3 -c '" + ("x" * 4096) + "'"
+            (session_directory / "command.txt").write_text(full_command, encoding="utf-8")
+            (session_directory / "input.log").write_bytes(b"print('from stdin')\n")
+            (session_directory / "output.log").write_bytes(b"remote stdout\n")
+            (session_directory / "timing.log").write_text("", encoding="ascii")
+            command_log = root / "commands.log"
+            command_log.write_text(
+                "2026-08-20T06:40:38+09:00 kali redteam-cmd[1]: "
+                "[event=start] [session=ssh-stdin] [seq=1] [uid=1000] [user=kali] "
+                "[tty=ssh-command] [pwd=/home/kali] [ssh=local] cmd=python3 -\n",
+                encoding="utf-8",
+            )
+
+            rendered = io.StringIO()
+            with contextlib.redirect_stdout(rendered):
+                LOGCAT.Logcat(
+                    command_log=command_log,
+                    sessions_dir=root / "sessions",
+                    history=1,
+                    interval=0.01,
+                    once=True,
+                ).run()
+
+        result = rendered.getvalue()
+        self.assertIn(full_command, result)
+        self.assertIn("  [stdin]", result)
+        self.assertIn("  | print('from stdin')", result)
+        self.assertIn("  [/stdin]", result)
+        self.assertIn("    remote stdout", result)
+
     def test_markerless_ssh_output_can_arrive_before_syslog(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)

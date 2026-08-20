@@ -11,17 +11,18 @@ import sys
 from pathlib import Path
 
 
-def write_all(descriptor: int, data: bytes) -> None:
-    """Mirror bytes without allowing a disconnected client to discard evidence."""
+def write_all(descriptor: int, data: bytes) -> bool:
+    """Mirror bytes and report whether a pipe receiver remained connected."""
     offset = 0
     while offset < len(data):
         try:
             written = os.write(descriptor, data[offset:])
         except BrokenPipeError:
-            return
+            return False
         if written <= 0:
-            return
+            return False
         offset += written
+    return True
 
 
 def target_environment(account: pwd.struct_passwd) -> dict[str, str]:
@@ -56,12 +57,18 @@ def main() -> int:
         session / "output.log", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
     )
     os.close(os.open(session / "timing.log", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600))
+    capture_stdin = os.environ.get("REDTEAM_SSH_CAPTURE_STDIN") == "1"
+    input_descriptor: int | None = None
     try:
+        if capture_stdin:
+            input_descriptor = os.open(
+                session / "input.log", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
+            )
         process = subprocess.Popen(
             [account.pw_shell, "-c", command],
             cwd=account.pw_dir,
             env=target_environment(account),
-            stdin=None,
+            stdin=subprocess.PIPE if capture_stdin else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             preexec_fn=lambda: drop_privileges(account),
@@ -70,8 +77,63 @@ def main() -> int:
         streams = selectors.DefaultSelector()
         streams.register(process.stdout, selectors.EVENT_READ, sys.stdout.fileno())
         streams.register(process.stderr, selectors.EVENT_READ, sys.stderr.fileno())
+        stdin_open = capture_stdin
+        child_stdin_open = capture_stdin
+        pending_stdin = bytearray()
+        source_stdin = sys.stdin.fileno()
+        child_stdin = process.stdin
+        if capture_stdin:
+            assert input_descriptor is not None and child_stdin is not None
+            os.set_blocking(child_stdin.fileno(), False)
+            streams.register(source_stdin, selectors.EVENT_READ, "ssh-stdin")
+
+        def close_child_stdin() -> None:
+            nonlocal child_stdin_open
+            if not child_stdin_open or child_stdin is None:
+                return
+            child_stdin_open = False
+            try:
+                streams.unregister(child_stdin.fileno())
+            except KeyError:
+                pass
+            try:
+                child_stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+
         while streams.get_map():
             for key, _ in streams.select():
+                if key.data == "ssh-stdin":
+                    data = os.read(source_stdin, 64 * 1024)
+                    if not data:
+                        streams.unregister(source_stdin)
+                        stdin_open = False
+                        if not pending_stdin:
+                            close_child_stdin()
+                        continue
+                    assert input_descriptor is not None and child_stdin is not None
+                    write_all(input_descriptor, data)
+                    pending_stdin.extend(data)
+                    try:
+                        streams.register(child_stdin.fileno(), selectors.EVENT_WRITE, "child-stdin")
+                    except KeyError:
+                        pass
+                    continue
+                if key.data == "child-stdin":
+                    assert child_stdin is not None
+                    try:
+                        written = os.write(child_stdin.fileno(), pending_stdin)
+                    except BrokenPipeError:
+                        pending_stdin.clear()
+                        close_child_stdin()
+                        continue
+                    if written > 0:
+                        del pending_stdin[:written]
+                    if not pending_stdin:
+                        streams.unregister(child_stdin.fileno())
+                        if not stdin_open:
+                            close_child_stdin()
+                    continue
                 data = os.read(key.fileobj.fileno(), 64 * 1024)
                 if not data:
                     streams.unregister(key.fileobj)
@@ -79,9 +141,19 @@ def main() -> int:
                     continue
                 write_all(output_descriptor, data)
                 write_all(key.data, data)
+            if process.poll() is not None:
+                pending_stdin.clear()
+                if capture_stdin:
+                    try:
+                        streams.unregister(source_stdin)
+                    except KeyError:
+                        pass
+                close_child_stdin()
         return_code = process.wait()
         return return_code if return_code >= 0 else 128 - return_code
     finally:
+        if input_descriptor is not None:
+            os.close(input_descriptor)
         os.close(output_descriptor)
 
 
