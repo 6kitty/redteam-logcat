@@ -17,6 +17,7 @@ check_only=false
 dry_run=false
 uninstall=false
 disable_transport=false
+capture_ssh_stdin=false
 transport_endpoint=
 transport_endpoint_id=
 transport_ca_cert=
@@ -32,6 +33,7 @@ usage() {
   cat <<'EOF'
 Usage:
   sudo ./install.sh --user USER [--retention-days DAYS] [--dry-run]
+  sudo ./install.sh --user USER --capture-ssh-stdin
   sudo ./install.sh --user USER --transport-endpoint https://HOST/v1/evidence --transport-endpoint-id ID --transport-ca-cert PATH --transport-client-cert PATH --transport-client-key PATH
   sudo ./install.sh --check
   sudo ./install.sh --disable-transport
@@ -40,6 +42,7 @@ Usage:
 Installs local evidence collection for one account:
   - shell command records in /var/log/redteam/commands.log
   - non-interactive SSH command records and output for that account
+  - optional root-only capture of stdin supplied to non-interactive SSH commands
   - auditd execve and execveat records for that account
   - root-owned structured terminal recordings in /var/log/redteam/sessions/USER
   - a root-only live viewer: sudo logcat
@@ -151,6 +154,7 @@ REDTEAM_USER_HOME='${target_home}'
 REDTEAM_USER_SHELL='${target_shell}'
 REDTEAM_WRAPPER='/usr/local/sbin/redteam-record-session'
 REDTEAM_SSH_RECORD_WRAPPER='/usr/local/sbin/redteam-record-ssh-command'
+REDTEAM_SSH_CAPTURE_STDIN=$([[ ${capture_ssh_stdin} == true ]] && printf 1 || printf 0)
 EOF
 }
 
@@ -487,6 +491,9 @@ printf '%s' "$1" >"$session/command.txt"
   printf 'session=%s\n' "$stamp"
   printf 'user=%s\n' "$REDTEAM_RECORD_USER"
   printf 'capture=ssh-command\n'
+  if [ "${REDTEAM_SSH_CAPTURE_STDIN:-0}" = 1 ]; then
+    printf 'input_capture=ssh-stdin\n'
+  fi
   printf 'started_utc=%s\n' "$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
 } >"$session/metadata"
 /usr/bin/chown root:root "$session/metadata"
@@ -499,6 +506,7 @@ command_for_log=$(printf '%s' "$1" | /usr/bin/tr '\r\n' '  ' | /usr/bin/cut -c 1
 set +e
 REDTEAM_SSH_RECORD_USER="$REDTEAM_RECORD_USER" \
 REDTEAM_SSH_CONNECTION="$ssh_connection" \
+REDTEAM_SSH_CAPTURE_STDIN="${REDTEAM_SSH_CAPTURE_STDIN:-0}" \
   /usr/local/libexec/redteam-ssh-stream "$session"
 result=$?
 set -e
@@ -721,6 +729,10 @@ main() {
         ;;
       --disable-transport)
         disable_transport=true
+        shift
+        ;;
+      --capture-ssh-stdin)
+        capture_ssh_stdin=true
         shift
         ;;
       --transport-endpoint)

@@ -2,8 +2,8 @@
 """Read-only live viewer for Redteam terminal evidence.
 
 The viewer consumes only root-owned files produced by install-redteam-logging.sh.
-It never enables terminal input recording and renders terminal output as safe plain
-text rather than replaying control sequences on the operator's terminal.
+It never enables collection itself and renders terminal evidence as safe plain text
+rather than replaying control sequences on the operator's terminal.
 """
 
 from __future__ import annotations
@@ -148,6 +148,28 @@ class SecureFollower:
             os.close(descriptor)
 
 
+def read_evidence_bytes(path: Path) -> bytes | None:
+    """Read one complete regular evidence artifact without following links."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise LogcatError(f"cannot open {path}: {error.strerror}") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise LogcatError(f"refusing non-regular evidence file: {path}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+
+
 class MarkerSplitter:
     """Remove private OSC boundary markers while leaving normal bytes intact."""
 
@@ -275,6 +297,15 @@ class PlainTextRenderer:
 
     def finish(self) -> None:
         self._flush_text()
+
+
+def safe_text(data: bytes) -> str:
+    """Render an evidence artifact without replaying its terminal controls."""
+    parts: list[str] = []
+    renderer = PlainTextRenderer(parts.append, preserve_sgr=False)
+    renderer.feed(data)
+    renderer.finish()
+    return "".join(parts)
 
 
 class IndentedOutput:
@@ -406,10 +437,36 @@ class SessionView:
         self.active_event = event
         self.displayed_output = IndentedOutput()
         print(f"\n[{event.timestamp}] {event.user} {event.tty} {event.working_directory}")
-        print(f"$ {event.command}")
+        command, stdin = self._recorded_ssh_input(event)
+        self._print_command(command)
+        if stdin:
+            self._print_ssh_stdin(stdin)
         for item in self.pending_output:
             self.displayed_output.write(item)
         self.pending_output.clear()
+
+    def _recorded_ssh_input(self, event: CommandEvent) -> tuple[str, bytes | None]:
+        """Prefer the unbounded root-only SSH artifacts over the syslog summary."""
+        if self.capture_kind != "ssh-command":
+            return event.command, None
+        directory = self.metadata_path.parent
+        command = read_evidence_bytes(directory / "command.txt")
+        stdin = read_evidence_bytes(directory / "input.log")
+        return (safe_text(command) if command else event.command), stdin
+
+    @staticmethod
+    def _print_command(command: str) -> None:
+        lines = command.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        print(f"$ {lines[0]}")
+        for line in lines[1:]:
+            print(f"> {line}")
+
+    @staticmethod
+    def _print_ssh_stdin(data: bytes) -> None:
+        print("  [stdin]")
+        for line in safe_text(data).splitlines():
+            print(f"  | {line}")
+        print("  [/stdin]")
 
     def _on_marker(self, fields: list[str]) -> None:
         event_type, session_id, sequence = fields[:3]

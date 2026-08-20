@@ -32,6 +32,22 @@ sessions **and its non-interactive SSH commands**, and installs `/usr/local/bin/
 It is safe to re-run: existing
 `/var/log/redteam/commands.log` is preserved.
 
+For a remote command such as `ssh sw-kali 'python3 -' < script.py`, the SSH
+command itself is `python3 -`; the script is stdin, not part of
+`SSH_ORIGINAL_COMMAND`. The unbounded original command is always retained in
+the root-only session artifact, so `logcat` does not rely on the 2,048-character
+syslog summary. To retain and render the supplied stdin too, explicitly enable
+it during installation:
+
+```bash
+sudo ./install.sh --user kali --capture-ssh-stdin
+```
+
+`sudo logcat` then shows the supplied bytes in a labelled `[stdin]` block and
+keeps program output indented underneath. This can record secrets supplied via
+here-documents or pipes, so enable it only under an approved retention and
+access-control policy.
+
 The installer is idempotent: when its audit rules for the selected account are
 already active, it does not reload those equivalent rules again.
 
@@ -168,7 +184,9 @@ monitor. The installed evidence files are root-owned and mode-restricted.
 
 It deliberately does **not** enable `script --log-in` or `--log-io`.
 Those options can record every keystroke, including passwords entered while
-terminal echo is disabled. Commands themselves and terminal output may still
+terminal echo is disabled. The optional `--capture-ssh-stdin` switch is limited
+to non-interactive forced SSH commands, but can likewise capture secrets sent
+by a here-document or pipe. Commands themselves and terminal output may still
 contain secrets. Restrict access, follow the engagement's retention/redaction
 policy, and configure operating-system audit-log retention/forwarding before
 relying on historical evidence. Windows retention deletes only with an explicit
