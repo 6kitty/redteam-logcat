@@ -19,6 +19,20 @@ SPEC.loader.exec_module(LOGCAT)
 
 
 class RedteamLogcatTests(unittest.TestCase):
+    def test_follower_checks_metadata_before_reopening_an_unchanged_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "output.log"
+            output.write_bytes(b"first\n")
+            follower = LOGCAT.SecureFollower(output, start_at_end=False)
+
+            self.assertTrue(follower.changed())
+            self.assertEqual(follower.read_new(), b"first\n")
+            self.assertFalse(follower.changed())
+
+            output.write_bytes(b"first\nsecond\n")
+            self.assertTrue(follower.changed())
+            self.assertEqual(follower.read_new(), b"second\n")
+
     def test_parses_structured_start_record(self) -> None:
         event = LOGCAT.parse_command_event(
             "2026-08-20T06:40:38+09:00 kali redteam-cmd[123]: "
@@ -271,6 +285,40 @@ class RedteamLogcatTests(unittest.TestCase):
 
         self.assertIn("$ printf fast", rendered.getvalue())
         self.assertIn("    fast output", rendered.getvalue())
+
+    def test_idle_session_is_not_polled_at_the_live_refresh_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            output = directory / "output.log"
+            output.write_bytes(b"")
+            timing = directory / "timing.log"
+            timing.write_text("", encoding="ascii")
+            session = LOGCAT.SessionView(
+                session_id="session-7",
+                output_path=output,
+                timing_path=timing,
+                metadata_path=directory / "metadata",
+                start_at_end=False,
+            )
+            session.note_polled(10.0)
+
+            self.assertFalse(session.needs_poll(10.49))
+            self.assertTrue(session.needs_poll(10.5))
+            session.register_event(
+                LOGCAT.CommandEvent(
+                    timestamp="2026-08-20T06:40:38+09:00",
+                    session="session-7",
+                    sequence="1",
+                    user="kali",
+                    tty="/dev/pts/3",
+                    working_directory="/home/kali",
+                    command="true",
+                )
+            )
+            self.assertTrue(session.needs_poll(10.01))
+
+    def test_default_live_interval_is_fifty_milliseconds(self) -> None:
+        self.assertEqual(LOGCAT.build_parser().parse_args([]).interval, 0.05)
 
     def test_color_mode_preserves_only_safe_sgr_sequences(self) -> None:
         output: list[str] = []

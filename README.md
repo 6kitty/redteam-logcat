@@ -43,6 +43,11 @@ sudo logcat
 Use `Ctrl-C` to stop viewing. `sudo logcat --history 20 --once` prints a
 bounded structured history instead of following new events.
 
+Live evidence is checked every 50 ms by default. Idle sessions are refreshed
+only every 0.5 seconds, while a newly logged command immediately promotes its
+session back to the fast path. Use `--interval SECONDS` to tune the active
+refresh cadence when needed.
+
 Colors emitted by the recorded command, such as Kali's coloured `ip addr`
 output, are preserved automatically when logcat writes to a terminal. Use
 `--color always` to force this, or `--no-color` for plain text.
