@@ -439,17 +439,20 @@ class Logcat:
         self.once = once
         self.color = color
         self.sessions: dict[str, SessionView] = {}
+        self.initial_session_discovery_complete = False
 
     def discover_sessions(self) -> None:
+        start_new_sessions_at_end = self.start_at_end and not self.initial_session_discovery_complete
         try:
-            user_directories: Iterable[Path] = self.sessions_dir.iterdir()
-        except FileNotFoundError:
+            user_directories: Iterable[Path] = tuple(self.sessions_dir.iterdir())
+        except OSError:
+            self.initial_session_discovery_complete = True
             return
         for user_directory in user_directories:
             try:
                 if not user_directory.is_dir() or user_directory.is_symlink():
                     continue
-                session_directories = user_directory.iterdir()
+                session_directories = tuple(user_directory.iterdir())
             except OSError:
                 continue
             for session_directory in session_directories:
@@ -467,10 +470,15 @@ class Logcat:
                         output_path=output_path,
                         timing_path=timing_path,
                         metadata_path=metadata,
-                        start_at_end=self.start_at_end,
+                        # The first scan ignores already-open sessions in live
+                        # mode. Sessions created afterwards must be consumed
+                        # from byte zero: a short remote command may finish
+                        # before the next poll discovers its output file.
+                        start_at_end=start_new_sessions_at_end,
                         capture_kind=capture_kind,
                         color=self.color,
                     )
+        self.initial_session_discovery_complete = True
 
     @staticmethod
     def _session_details(metadata: Path) -> tuple[str | None, str]:
