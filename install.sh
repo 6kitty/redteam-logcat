@@ -530,9 +530,18 @@ validate_files() {
 }
 
 activate_logging() {
+  local target_uid
+  target_uid=$(id -u "${target_user}")
+
   systemctl enable --now rsyslog
   systemctl enable --now auditd
-  augenrules --load
+  # augenrules may reject a second semantically identical rule on some Kali
+  # auditd builds.  A re-run does not need to load it again when both ABI
+  # rules for the configured audit login UID are already active.
+  if ! auditctl -l | grep -F 'arch=b64' | grep -Fq "auid=${target_uid} -F key=redteam_exec" || \
+     ! auditctl -l | grep -F 'arch=b32' | grep -Fq "auid=${target_uid} -F key=redteam_exec"; then
+    augenrules --load
+  fi
   systemctl restart rsyslog
   # Kali's packaged ssh.service may accept a reload without applying a newly
   # added Match/ForceCommand rule to new sessions.  A listener restart applies

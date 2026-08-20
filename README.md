@@ -31,6 +31,9 @@ sessions **and its non-interactive SSH commands**, and installs `/usr/local/bin/
 It is safe to re-run: existing
 `/var/log/redteam/commands.log` is preserved.
 
+The installer is idempotent: when its audit rules for the selected account are
+already active, it does not reload those equivalent rules again.
+
 Start observing in one SSH terminal, then operate in another:
 
 ```bash
