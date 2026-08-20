@@ -82,6 +82,8 @@ For the configured account, the installer also adds an OpenSSH `Match User`
 evidence session without changing the command's output bytes or exit status.
 The default SFTP subsystem is passed through unchanged, so SFTP remains
 available but is not converted into a terminal-style command/output record.
+Applying this rule restarts the SSH listener after `sshd -t` validation; active
+SSH session children are not terminated on the supported Kali/Debian service.
 
 ## Security boundary
 

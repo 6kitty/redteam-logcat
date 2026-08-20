@@ -534,7 +534,10 @@ activate_logging() {
   systemctl enable --now auditd
   augenrules --load
   systemctl restart rsyslog
-  systemctl reload ssh
+  # Kali's packaged ssh.service may accept a reload without applying a newly
+  # added Match/ForceCommand rule to new sessions.  A listener restart applies
+  # the already-validated configuration; existing session children continue.
+  systemctl restart ssh
   systemctl is-active --quiet rsyslog
   systemctl is-active --quiet auditd
   auditctl -l | grep -Fq 'key=redteam_exec'
