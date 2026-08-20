@@ -230,6 +230,48 @@ class RedteamLogcatTests(unittest.TestCase):
 
         self.assertIn("    arrived before syslog", rendered.getvalue())
 
+    def test_live_view_reads_a_new_fast_ssh_session_from_its_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            command_log = root / "commands.log"
+            command_log.write_text("", encoding="utf-8")
+            logcat = LOGCAT.Logcat(
+                command_log=command_log,
+                sessions_dir=root / "sessions",
+                history=0,
+                interval=0.01,
+                once=False,
+            )
+
+            # Initial live startup must skip no historical output when there
+            # are no sessions, then replay a newly discovered fast session.
+            logcat.discover_sessions()
+            logcat._read_command_events()
+            session_directory = root / "sessions" / "kali" / "ssh-live"
+            session_directory.mkdir(parents=True)
+            (session_directory / "metadata").write_text(
+                "session=ssh-live\ncapture=ssh-command\nended_utc=2026-08-20T00:00:01Z\nexit_status=0\n",
+                encoding="utf-8",
+            )
+            (session_directory / "output.log").write_bytes(b"fast output\n")
+            (session_directory / "timing.log").write_text("", encoding="ascii")
+            command_log.write_text(
+                "2026-08-20T06:40:38+09:00 kali redteam-cmd[1]: "
+                "[event=start] [session=ssh-live] [seq=1] [uid=1000] [user=kali] "
+                "[tty=ssh-command] [pwd=/home/kali] [ssh=local] cmd=printf fast\n",
+                encoding="utf-8",
+            )
+
+            rendered = io.StringIO()
+            with contextlib.redirect_stdout(rendered):
+                logcat.discover_sessions()
+                logcat._read_command_events()
+                for session in logcat.sessions.values():
+                    session.poll()
+
+        self.assertIn("$ printf fast", rendered.getvalue())
+        self.assertIn("    fast output", rendered.getvalue())
+
     def test_color_mode_preserves_only_safe_sgr_sequences(self) -> None:
         output: list[str] = []
         renderer = LOGCAT.PlainTextRenderer(output.append, preserve_sgr=True)

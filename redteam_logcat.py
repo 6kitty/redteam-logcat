@@ -439,11 +439,14 @@ class Logcat:
         self.once = once
         self.color = color
         self.sessions: dict[str, SessionView] = {}
+        self.initial_session_discovery_complete = False
 
     def discover_sessions(self) -> None:
+        start_new_sessions_at_end = self.start_at_end and not self.initial_session_discovery_complete
         try:
             user_directories: Iterable[Path] = self.sessions_dir.iterdir()
         except FileNotFoundError:
+            self.initial_session_discovery_complete = True
             return
         for user_directory in user_directories:
             try:
@@ -467,10 +470,15 @@ class Logcat:
                         output_path=output_path,
                         timing_path=timing_path,
                         metadata_path=metadata,
-                        start_at_end=self.start_at_end,
+                        # The first scan ignores already-open sessions in live
+                        # mode. Sessions created afterwards must be consumed
+                        # from byte zero: a short remote command may finish
+                        # before the next poll discovers its output file.
+                        start_at_end=start_new_sessions_at_end,
                         capture_kind=capture_kind,
                         color=self.color,
                     )
+        self.initial_session_discovery_complete = True
 
     @staticmethod
     def _session_details(metadata: Path) -> tuple[str | None, str]:
