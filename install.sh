@@ -8,10 +8,20 @@ readonly REDTEAM_DIR=/etc/redteam
 readonly LOG_DIR=/var/log/redteam
 readonly SESSION_DIR=/var/log/redteam/sessions
 readonly SPOOL_DIR=/var/spool/rsyslog
+readonly TRANSPORT_DIR=/var/log/redteam/transport
+readonly TRANSPORT_LIB=/usr/local/lib/redteam-logcat
 
 target_user=${SUDO_USER:-}
 retention_days=90
 check_only=false
+dry_run=false
+uninstall=false
+disable_transport=false
+transport_endpoint=
+transport_endpoint_id=
+transport_ca_cert=
+transport_client_cert=
+transport_client_key=
 
 die() {
   printf '%s\n' "${SCRIPT_NAME}: $*" >&2
@@ -21,8 +31,11 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  sudo ./install.sh --user USER [--retention-days DAYS]
+  sudo ./install.sh --user USER [--retention-days DAYS] [--dry-run]
+  sudo ./install.sh --user USER --transport-endpoint https://HOST/v1/evidence --transport-endpoint-id ID --transport-ca-cert PATH --transport-client-cert PATH --transport-client-key PATH
   sudo ./install.sh --check
+  sudo ./install.sh --disable-transport
+  sudo ./install.sh --uninstall [--dry-run]
 
 Installs local evidence collection for one account:
   - shell command records in /var/log/redteam/commands.log
@@ -31,8 +44,8 @@ Installs local evidence collection for one account:
   - root-owned structured terminal recordings in /var/log/redteam/sessions/USER
   - a root-only live viewer: sudo logcat
 
-The installer does not configure an off-host collector. Add a collector only with
-an approved TLS endpoint and its CA/client certificates.
+Off-host transmission is disabled by default. It is enabled only when all five
+transport arguments are supplied; evidence remains queued locally on failures.
 EOF
 }
 
@@ -57,6 +70,29 @@ validate_user() {
 validate_retention() {
   [[ ${retention_days} =~ ^[0-9]+$ ]] || die "retention days must be an integer"
   (( retention_days >= 1 && retention_days <= 3650 )) || die "retention days must be between 1 and 3650"
+}
+
+validate_transport() {
+  local item
+  local -a values=("${transport_endpoint}" "${transport_endpoint_id}" "${transport_ca_cert}" "${transport_client_cert}" "${transport_client_key}")
+  local supplied=0
+  for item in "${values[@]}"; do [[ -n ${item} ]] && ((supplied += 1)); done
+  [[ ${disable_transport} == false || ${supplied} -eq 0 ]] || die "--disable-transport cannot be combined with --transport-* values"
+  (( supplied == 0 || supplied == 5 )) || die "all five --transport-* values are required together"
+  (( supplied == 0 )) && return 0
+  [[ ${transport_endpoint} =~ ^https://[^/?#[:space:]]+/v1/evidence$ && ${transport_endpoint} != *$'\n'* ]] || die "transport endpoint must be exact https://HOST/v1/evidence"
+  [[ ${transport_endpoint_id} =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$ ]] || die "invalid transport endpoint ID"
+  for item in "${transport_endpoint_id}" "${transport_ca_cert}" "${transport_client_cert}" "${transport_client_key}"; do
+    [[ ${item} != *$'\n'* && ${item} != *$'\r'* ]] || die "transport configuration values must be newline-free"
+  done
+  if [[ ${dry_run} == false ]]; then
+    for item in "${transport_ca_cert}" "${transport_client_cert}" "${transport_client_key}"; do
+      [[ ${item} == /* && ${item} != /home/* && ${item} != /root/* ]] || die "transport TLS files must use an absolute system path outside home directories"
+      [[ -f ${item} && ! -L ${item} && -r ${item} ]] || die "transport TLS files must be readable regular files"
+      [[ $(stat -c '%u:%a' "${item}") =~ ^0: ]] || die "transport TLS files must be root-owned"
+      (( (8#$(stat -c '%a' "${item}")) & 022 == 0 )) || die "transport TLS files must not be group/world writable"
+    done
+  fi
 }
 
 install_from_stdin() {
@@ -511,6 +547,86 @@ write_audit_rules() {
 EOF
 }
 
+write_transport() {
+  local source transport_was_enabled=false cursor temporary inode size configured_endpoint_id
+  source=${SCRIPT_DIRECTORY}/platform/linux/redteam-linux-transport.py
+  [[ -r ${source} ]] || die "missing Linux transport asset: ${source}"
+  [[ ! -L ${TRANSPORT_DIR} && ( ! -e ${TRANSPORT_DIR} || -d ${TRANSPORT_DIR} ) ]] || die "refusing non-directory or symlink transport spool"
+  [[ ! -L ${REDTEAM_DIR}/transport.conf && ( ! -e ${REDTEAM_DIR}/transport.conf || -f ${REDTEAM_DIR}/transport.conf ) ]] || die "refusing non-regular or symlink transport config"
+  if [[ ${dry_run} == true ]]; then
+    printf 'would install optional Linux mTLS transport (enabled=%s)\n' "$([[ -n ${transport_endpoint} ]] && printf yes || printf no)"
+    return 0
+  fi
+  install -d -o root -g root -m 0755 "${TRANSPORT_LIB}"
+  install -d -o root -g root -m 0700 "${TRANSPORT_DIR}"
+  install -o root -g root -m 0755 "${source}" "${TRANSPORT_LIB}/redteam-linux-transport"
+  install -o root -g root -m 0644 "${SCRIPT_DIRECTORY}/central_collector.py" "${TRANSPORT_LIB}/central_collector.py"
+  install -o root -g root -m 0644 "${SCRIPT_DIRECTORY}/redteam_evidence_protocol.py" "${TRANSPORT_LIB}/redteam_evidence_protocol.py"
+  install -o root -g root -m 0644 "${SCRIPT_DIRECTORY}/platform/linux/redteam-logcat-transport.service" /etc/systemd/system/redteam-logcat-transport.service
+  install -o root -g root -m 0644 "${SCRIPT_DIRECTORY}/platform/linux/redteam-logcat-transport.timer" /etc/systemd/system/redteam-logcat-transport.timer
+  if [[ -r ${REDTEAM_DIR}/transport.conf ]] && grep -Fxq 'LINUX_TRANSPORT_ENABLED=1' "${REDTEAM_DIR}/transport.conf"; then
+    transport_was_enabled=true
+    configured_endpoint_id=$(awk -F= '/^LINUX_TRANSPORT_ENDPOINT_ID=/{print $2; exit}' "${REDTEAM_DIR}/transport.conf")
+  fi
+  if [[ ${transport_was_enabled} == true && -n ${transport_endpoint} && ${configured_endpoint_id} != "${transport_endpoint_id}" ]]; then
+    die "refusing active transport endpoint-ID change; disable transport first to preserve the existing chain and spool"
+  fi
+  if [[ ${transport_was_enabled} == true && -z ${transport_endpoint} && ${disable_transport} == false ]]; then
+    # Idempotent base-installer re-runs must never turn an approved active
+    # transport off merely because its secrets were intentionally omitted.
+    systemctl daemon-reload
+    return 0
+  fi
+  if [[ -n ${transport_endpoint} ]]; then
+    if [[ ${transport_was_enabled} == false ]]; then
+      # Cut over at activation.  Existing local recordings stay local rather
+      # than being silently backfilled to a newly configured central endpoint.
+      [[ -f ${LOG_DIR}/commands.log && ! -L ${LOG_DIR}/commands.log ]] || die "missing regular command log for transport cutover"
+      inode=$(stat -c '%i' "${LOG_DIR}/commands.log")
+      size=$(stat -c '%s' "${LOG_DIR}/commands.log")
+      cursor=${TRANSPORT_DIR}/commands-cursor.json
+      temporary=$(mktemp "${TRANSPORT_DIR}/.commands-cursor.XXXXXX")
+      printf '{"inode":%s,"offset":%s}\n' "${inode}" "${size}" >"${temporary}"
+      chown root:root "${temporary}"
+      chmod 0600 "${temporary}"
+      mv -f "${temporary}" "${cursor}"
+    fi
+    install_from_stdin "${REDTEAM_DIR}/transport.conf" 0600 <<EOF
+LINUX_TRANSPORT_ENABLED=1
+LINUX_TRANSPORT_ENDPOINT=${transport_endpoint}
+LINUX_TRANSPORT_ENDPOINT_ID=${transport_endpoint_id}
+LINUX_TRANSPORT_CA_CERT=${transport_ca_cert}
+LINUX_TRANSPORT_CLIENT_CERT=${transport_client_cert}
+LINUX_TRANSPORT_CLIENT_KEY=${transport_client_key}
+EOF
+  else
+    install_from_stdin "${REDTEAM_DIR}/transport.conf" 0600 <<'EOF'
+LINUX_TRANSPORT_ENABLED=0
+EOF
+  fi
+  systemctl daemon-reload
+  if [[ -n ${transport_endpoint} ]]; then
+    systemctl enable --now redteam-logcat-transport.timer
+  else
+    # This explicit disabled configuration retains the root-owned spool and
+    # local evidence; it only stops outbound attempts.
+    systemctl disable --now redteam-logcat-transport.timer >/dev/null 2>&1 || true
+  fi
+}
+
+uninstall_transport() {
+  if [[ ${dry_run} == true ]]; then
+    printf 'would remove Linux transport programs/config while preserving %s\n' "${TRANSPORT_DIR}"
+    return 0
+  fi
+  systemctl disable --now redteam-logcat-transport.timer >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/redteam-logcat-transport.service /etc/systemd/system/redteam-logcat-transport.timer
+  rm -f "${REDTEAM_DIR}/transport.conf"
+  rm -rf "${TRANSPORT_LIB}"
+  systemctl daemon-reload
+  printf 'Linux transport removed; preserved evidence under %s\n' "${TRANSPORT_DIR}"
+}
+
 validate_files() {
   local sshd_effective_config
 
@@ -522,6 +638,9 @@ validate_files() {
   sh -n /usr/local/sbin/redteam-ssh-force-command
   python3 -c 'compile(open("/usr/local/libexec/redteam-ssh-stream", "rb").read(), "/usr/local/libexec/redteam-ssh-stream", "exec")'
   python3 -c 'compile(open("/usr/local/bin/logcat", "rb").read(), "/usr/local/bin/logcat", "exec")'
+  [[ -r ${REDTEAM_DIR}/transport.conf ]] || die "transport config is missing"
+  [[ $(stat -c '%U:%a' "${REDTEAM_DIR}/transport.conf") == root:600 ]] || die "transport config must be root-owned mode 0600"
+  python3 "${TRANSPORT_LIB}/redteam-linux-transport" check
   visudo -cf /etc/sudoers.d/90-redteam-record-session
   rsyslogd -N1
   logrotate -d /etc/logrotate.d/redteam-command-log >/dev/null
@@ -552,6 +671,9 @@ activate_logging() {
   systemctl is-active --quiet rsyslog
   systemctl is-active --quiet auditd
   auditctl -l | grep -Fq 'key=redteam_exec'
+  if grep -Fxq 'LINUX_TRANSPORT_ENABLED=1' "${REDTEAM_DIR}/transport.conf"; then
+    systemctl is-enabled --quiet redteam-logcat-transport.timer
+  fi
 }
 
 validate_and_activate() {
@@ -589,6 +711,43 @@ main() {
         check_only=true
         shift
         ;;
+      --dry-run)
+        dry_run=true
+        shift
+        ;;
+      --uninstall)
+        uninstall=true
+        shift
+        ;;
+      --disable-transport)
+        disable_transport=true
+        shift
+        ;;
+      --transport-endpoint)
+        (($# >= 2)) || die "--transport-endpoint requires a value"
+        transport_endpoint=$2
+        shift 2
+        ;;
+      --transport-endpoint-id)
+        (($# >= 2)) || die "--transport-endpoint-id requires a value"
+        transport_endpoint_id=$2
+        shift 2
+        ;;
+      --transport-ca-cert)
+        (($# >= 2)) || die "--transport-ca-cert requires a value"
+        transport_ca_cert=$2
+        shift 2
+        ;;
+      --transport-client-cert)
+        (($# >= 2)) || die "--transport-client-cert requires a value"
+        transport_client_cert=$2
+        shift 2
+        ;;
+      --transport-client-key)
+        (($# >= 2)) || die "--transport-client-key requires a value"
+        transport_client_key=$2
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -604,10 +763,22 @@ main() {
     return
   fi
 
+  if [[ ${uninstall} == true ]]; then
+    require_root
+    uninstall_transport
+    return
+  fi
+
   require_root
   require_debian_family
   validate_user
   validate_retention
+  validate_transport
+  if [[ ${dry_run} == true ]]; then
+    printf 'dry run passed validation; no packages, files, services, or network connections changed\n'
+    write_transport
+    return
+  fi
   install_packages
   write_recording_config
   write_rsyslog_config
@@ -617,6 +788,7 @@ main() {
   write_logcat
   write_ssh_command_recorder
   write_audit_rules
+  write_transport
   validate_and_activate
 
   printf 'installed redteam evidence collection for %s\n' "${target_user}"

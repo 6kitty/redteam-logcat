@@ -1,0 +1,4 @@
+#!/bin/sh
+# Read-only local handoff. A separately approved shipper may consume stdout.
+[ "$(id -u)" -eq 0 ] || { echo 'run as root' >&2; exit 77; }
+exec cat /var/log/redteam/spool/events.jsonl

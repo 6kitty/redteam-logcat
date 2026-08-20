@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+. '/Library/Application Support/RedteamLogcat/config'
+[ "$(id -u)" -eq 0 ] && [ "${SUDO_USER:-}" = "$REDTEAM_RECORD_USER" ] && [ "$#" -eq 0 ] || exit 64
+umask 077
+stamp="$(date -u +%Y%m%dT%H%M%S)-$$"; session="/var/log/redteam/sessions/$REDTEAM_RECORD_USER/$stamp"
+install -d -o root -g wheel -m 0750 "$session"
+: >"$session/output.log"; : >"$session/timing.log"
+chown root:wheel "$session/output.log" "$session/timing.log"; chmod 0600 "$session/output.log" "$session/timing.log"
+printf 'session=%s\nuser=%s\ncapture=terminal\nstarted_utc=%s\n' "$stamp" "$REDTEAM_RECORD_USER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$session/metadata"
+chown root:wheel "$session/metadata"; chmod 0600 "$session/metadata"
+set +e
+# -F flushes each write and -e returns the child status. Deliberately omit
+# BSD script -k, which records input.
+/usr/bin/script -q -e -F "$session/output.log" /usr/bin/sudo -u "$REDTEAM_RECORD_USER" /usr/bin/env -i HOME="$REDTEAM_USER_HOME" USER="$REDTEAM_RECORD_USER" LOGNAME="$REDTEAM_RECORD_USER" SHELL="$REDTEAM_USER_SHELL" TERM="${TERM:-xterm-256color}" PATH=/usr/bin:/bin:/usr/sbin:/sbin RT_SESSION_RECORDING=1 REDTEAM_SESSION_ID="$stamp" "$REDTEAM_USER_SHELL" -il
+status=$?
+set -e
+printf 'ended_utc=%s\nexit_status=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$status" >>"$session/metadata"
+exit "$status"

@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+. '/Library/Application Support/RedteamLogcat/config'
+[ "$(id -u)" -eq 0 ] && [ "${SUDO_USER:-}" = "$REDTEAM_RECORD_USER" ] || exit 64
+[ "$#" -ge 6 ] && [ "$#" -le 8 ] || exit 64
+event=$1; session=$2; sequence=$3; command=$4; tty=$5; pwd=$6; ssh=${7:-local}; result=${8:-}
+case "$event" in start|end) ;; *) exit 64;; esac
+case "$session" in *[!A-Za-z0-9_.-]*|'') exit 64;; esac
+case "$sequence" in *[!0-9]*|'') exit 64;; esac
+clean() { printf '%s' "$1" | tr '\r\n[]' '    ' | cut -c 1-2048; }
+command=$(clean "$command"); tty=$(clean "$tty"); pwd=$(clean "$pwd"); ssh=$(clean "$ssh")
+line="$(date -u +%Y-%m-%dT%H:%M:%SZ) ${REDTEAM_RECORD_USER} redteam-cmd[$$]: [event=$event] [session=$session] [seq=$sequence] [uid=$(id -u "$REDTEAM_RECORD_USER")] [user=$REDTEAM_RECORD_USER] [tty=$tty] [pwd=$pwd] [ssh=$ssh]"
+[ "$event" = end ] && line="$line [ret=$(clean "$result")]"
+printf '%s cmd=%s\n' "$line" "$command" >>/var/log/redteam/commands.log
+# Queue only completed boundaries. The root transport adapter extracts the exact
+# bounded output between private OSC markers, hashes it, and uses the shared mTLS spool.
+if [ "$event" = end ] && [ -r '/Library/Application Support/RedteamLogcat/transport.conf' ] && grep -Fxq 'MACOS_TRANSPORT_ENABLED=1' '/Library/Application Support/RedteamLogcat/transport.conf'; then
+  job=/var/log/redteam/transport/capture-pending/"$session-$sequence.json"
+  install -d -o root -g wheel -m 0700 /var/log/redteam/transport/capture-pending
+  printf '{"session":"%s","sequence":"%s","output_path":"/var/log/redteam/sessions/%s/%s/output.log"}\n' "$session" "$sequence" "$REDTEAM_RECORD_USER" "$session" >"$job"
+  chown root:wheel "$job"; chmod 0600 "$job"
+fi
