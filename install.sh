@@ -512,6 +512,8 @@ EOF
 }
 
 validate_files() {
+  local sshd_effective_config
+
   bash -n /etc/profile.d/redteam-command-logging.sh
   zsh -n /etc/zsh/redteam-command-logging.zsh
   sh -n /etc/redteam/session-bootstrap.sh
@@ -525,8 +527,8 @@ validate_files() {
   logrotate -d /etc/logrotate.d/redteam-command-log >/dev/null
   sshd -t
   . /etc/redteam/recording.conf
-  sshd -T -C "user=${REDTEAM_RECORD_USER},addr=127.0.0.1,host=localhost" | \
-    grep -Fxq 'forcecommand /usr/local/sbin/redteam-ssh-force-command'
+  sshd_effective_config=$(sshd -T -C "user=${REDTEAM_RECORD_USER},addr=127.0.0.1,host=localhost")
+  grep -Fxq 'forcecommand /usr/local/sbin/redteam-ssh-force-command' <<<"${sshd_effective_config}"
 }
 
 activate_logging() {
