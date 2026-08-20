@@ -444,15 +444,15 @@ class Logcat:
     def discover_sessions(self) -> None:
         start_new_sessions_at_end = self.start_at_end and not self.initial_session_discovery_complete
         try:
-            user_directories: Iterable[Path] = self.sessions_dir.iterdir()
-        except FileNotFoundError:
+            user_directories: Iterable[Path] = tuple(self.sessions_dir.iterdir())
+        except OSError:
             self.initial_session_discovery_complete = True
             return
         for user_directory in user_directories:
             try:
                 if not user_directory.is_dir() or user_directory.is_symlink():
                     continue
-                session_directories = user_directory.iterdir()
+                session_directories = tuple(user_directory.iterdir())
             except OSError:
                 continue
             for session_directory in session_directories:
