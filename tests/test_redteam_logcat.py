@@ -52,6 +52,7 @@ class RedteamLogcatTests(unittest.TestCase):
                 session_id="session-7",
                 output_path=output,
                 timing_path=timing,
+                metadata_path=directory / "metadata",
                 start_at_end=False,
             )
             session.register_event(
@@ -135,6 +136,7 @@ class RedteamLogcatTests(unittest.TestCase):
                 session_id="session-7",
                 output_path=output,
                 timing_path=timing,
+                metadata_path=directory / "metadata",
                 start_at_end=False,
             )
             rendered = io.StringIO()
@@ -154,6 +156,79 @@ class RedteamLogcatTests(unittest.TestCase):
 
         self.assertIn("$ false", rendered.getvalue())
         self.assertIn("[exit 1]", rendered.getvalue())
+
+    def test_groups_markerless_ssh_command_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            session_directory = root / "sessions" / "kali" / "ssh-7"
+            session_directory.mkdir(parents=True)
+            (session_directory / "metadata").write_text(
+                "session=ssh-7\ncapture=ssh-command\nended_utc=2026-08-20T00:00:01Z\nexit_status=7\n",
+                encoding="utf-8",
+            )
+            (session_directory / "output.log").write_bytes(b"remote stdout\nremote stderr\n")
+            (session_directory / "timing.log").write_text("", encoding="ascii")
+            command_log = root / "commands.log"
+            command_log.write_text(
+                "2026-08-20T06:40:38+09:00 kali redteam-cmd[1]: "
+                "[event=start] [session=ssh-7] [seq=1] [uid=1000] [user=kali] "
+                "[tty=ssh-command] [pwd=/home/kali] [ssh=local] cmd=printf remote\n",
+                encoding="utf-8",
+            )
+
+            rendered = io.StringIO()
+            with contextlib.redirect_stdout(rendered):
+                LOGCAT.Logcat(
+                    command_log=command_log,
+                    sessions_dir=root / "sessions",
+                    history=1,
+                    interval=0.01,
+                    once=True,
+                ).run()
+
+        result = rendered.getvalue()
+        self.assertIn("$ printf remote", result)
+        self.assertIn("    remote stdout", result)
+        self.assertIn("    remote stderr", result)
+        self.assertIn("    [exit 7]", result)
+
+    def test_markerless_ssh_output_can_arrive_before_syslog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            metadata = directory / "metadata"
+            output = directory / "output.log"
+            timing = directory / "timing.log"
+            metadata.write_text(
+                "session=ssh-race\ncapture=ssh-command\nended_utc=2026-08-20T00:00:01Z\nexit_status=0\n",
+                encoding="utf-8",
+            )
+            output.write_bytes(b"arrived before syslog\n")
+            timing.write_text("", encoding="ascii")
+            session = LOGCAT.SessionView(
+                session_id="ssh-race",
+                output_path=output,
+                timing_path=timing,
+                metadata_path=metadata,
+                start_at_end=False,
+                capture_kind="ssh-command",
+            )
+
+            rendered = io.StringIO()
+            with contextlib.redirect_stdout(rendered):
+                session.poll()
+                session.register_event(
+                    LOGCAT.CommandEvent(
+                        timestamp="2026-08-20T06:40:38+09:00",
+                        session="ssh-race",
+                        sequence="1",
+                        user="kali",
+                        tty="ssh-command",
+                        working_directory="/home/kali",
+                        command="printf race",
+                    )
+                )
+
+        self.assertIn("    arrived before syslog", rendered.getvalue())
 
     def test_color_mode_preserves_only_safe_sgr_sequences(self) -> None:
         output: list[str] = []
